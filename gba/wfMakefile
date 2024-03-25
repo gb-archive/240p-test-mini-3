@@ -1,0 +1,161 @@
+# 160p Test Suite (Wonderful edition) makefile
+# Requires Wonderful toolchain, tonclib, and grit
+# (currently, BlocksDS provides grit)
+#
+# How to build this on GNU/Linux on x86-64
+# 
+# First download the bootstrap from
+# https://wonderful.asie.pl/docs/getting-started/>
+# Then open a terminal:
+# 
+# sudo mkdir "/opt/wonderful"
+# sudo chown -R "$USER" "/opt/wonderful"
+# pushd "/opt/wonderful"
+# tar xzvf "$HOME/Downloads/wf-bootstrap-x86_64.tar.gz"
+# export PATH="/opt/wonderful/bin:$PATH"
+# popd
+# wf-pacman -Syu
+# wf-pacman -S target-gba thirdparty-blocksds-toolchain
+
+# configuration
+NAME := 240pwf
+TARGET := gba/multiboot
+LIBS := -ltonc
+
+# imports
+export WONDERFUL_TOOLCHAIN ?= /opt/wonderful
+include $(WONDERFUL_TOOLCHAIN)/target/$(TARGET)/makedefs.mk
+
+# external tools
+GRIT ?= $(WONDERFUL_TOOLCHAIN)/thirdparty/blocksds/core/tools/grit
+
+# build OS adaptation: COMSPEC is set on Windows and not *n?x
+ifdef COMSPEC
+  PY := py -3
+else
+  PY := python3
+endif
+
+# directories
+LIBDIRS := $(WF_EXTLIB_DIR)/libtonc
+SOURCES := src
+BUILD := build
+GRAPHICS := tilesets
+COMMON_GRAPHICS := ../common/tilesets
+export DEPSDIR := $(BUILD)
+
+.PHONY: $(BUILD) clean
+.SUFFIXES:
+
+# compiler flags
+
+CFLAGS := \
+  -std=gnu2x $(WARNFLAGS) $(DEFINES) $(WF_ARCH_CFLAGS) \
+  $(INCLUDEFLAGS) -ffunction-sections -fdata-sections -O2
+ASFLAGS := \
+  -x assembler-with-cpp $(DEFINES) $(WF_ARCH_CFLAGS) \
+  $(INCLUDEFLAGS) -ffunction-sections -fdata-sections
+LIBDIRSFLAGS	:= $(foreach path,$(LIBDIRS),-L$(path)/lib)
+LDFLAGS		:= $(LIBDIRSFLAGS) -Wl,-Map,$(MAP) -Wl,--gc-sections \
+		   $(WF_ARCH_LDFLAGS) $(LIBS)
+
+# output filenames
+MKDIR_SENTINEL := $(BUILD)/index.txt
+ELF := $(BUILD)/$(NAME).elf
+MAP := $(BUILD)/$(NAME).map
+ROM := $(NAME)_mb.gba
+.PHONY: run clean dist rom
+rom: $(ROM)
+
+# Source lists ######################################################
+
+# source code files
+CFILES := \
+  main.c help.c \
+  placeholder.c stills.c overscan.c scrolltest.c motionblur.c \
+  shadowsprite.c stopwatch.c soundtest.c audiosync.c backlight.c megaton.c \
+  pads.c ppuclear.c vwfdraw.c vwflabels.c undte.c rand.c 4bcanvas.c
+CPPFILES :=
+SFILES := posprintf.s
+
+# sources with corresponding C headers generated from assets
+S_H_SFILES := \
+  bggfx_chr.s spritegfx_chr.s monoscope_chr.s sharpness_chr.s \
+  stopwatchface_chr.s stopwatchhand_chr.s stopwatchdigits_chr.s \
+  kikimap_chr.s kikitiles_chr.s greenhillzone_chr.s hepsie_chr.s \
+  Gus_portrait_chr.s convergence_chr.s pluge_shark_6color_chr.s \
+  helpbgtiles_chr.s helpsprites_chr.s Donna_chr.s vwf7.s helppages.s
+
+# files included verbatim
+BINFILES :=
+
+# Dependency collation ##############################################
+
+OFILES_BIN := $(addsuffix .o,$(BINFILES))
+OFILES_SOURCES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o) $(SFILES:.s=.o) $(S_H_SFILES:.s=.o)
+HFILES_BIN := $(addsuffix .h,$(subst .,_,$(BINFILES)))
+HFILES_S_H := $(subst .s,.h,$(S_H_SFILES))
+OFILES := $(foreach o, $(OFILES_BIN) $(OFILES_SOURCES), $(BUILD)/$o)
+HFILES := $(foreach o, $(HFILES_BIN) $(HFILES_S_H), $(BUILD)/$o)
+INCLUDE := \
+  $(foreach dir,$(INCLUDES),-iquote $(dir)) \
+  $(foreach dir,$(LIBDIRS),-I$(dir)/include) -I$(BUILD)
+
+-include $(OFILES:.o=.d)
+
+# Convert all assets before compiling any source code files
+$(foreach o, $(OFILES_SOURCES), $(BUILD)/$o): $(HFILES) $(MKDIR_SENTINEL)
+
+# Source code rules #################################################
+
+$(BUILD)/%.o: $(SOURCES)/%.c
+	@echo "INCLUDES is ${INCLUDES}"
+	@echo "INCLUDE is ${INCLUDE}"
+	@echo "HFILES is ${HFILES}"
+	@echo "OFILES_SOURCES is $(foreach o, $(OFILES_SOURCES), $(BUILD)/$o)"
+	$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(INCLUDE) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: $(SOURCES)/%.s
+	$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(INCLUDE) $(ASFLAGS) -c $< -o $@
+
+$(BUILD)/%.o: $(BUILD)/%.s
+	$(CC) -MMD -MP -MF $(DEPSDIR)/$*.d $(CPPFLAGS) $(INCLUDE) $(ASFLAGS) -c $< -o $@
+
+# Asset conversion rules ############################################
+
+$(BUILD)/%_chr.s $(BUILD)/%_chr.h: \
+  $(GRAPHICS)/%.png $(GRAPHICS)/%.grit $(MKDIR_SENTINEL)
+	grit $< -ff$(word 2,$^) -fts -o$(BUILD)/$*_chr
+# grit files for common graphics go in each port's asset folder
+$(BUILD)/%_chr.s $(BUILD)/%_chr.h: \
+  $(COMMON_GRAPHICS)/%.png $(GRAPHICS)/%.grit $(MKDIR_SENTINEL)
+	grit $< -ff$(word 2,$^) -fts -o$(BUILD)/$*_chr
+
+# correct handling of output files requires grouped targets (&:)
+# added in GNU Make 4.3
+$(BUILD)/vwf7.s $(BUILD)/vwf7.h &: \
+  $(COMMON_GRAPHICS)/vwf7_cp144p.png tools/vwfbuild.py
+	$(PY) tools/vwfbuild.py $< $(basename $@).s $(basename $@).h
+
+$(BUILD)/helppages.s $(BUILD)/helppages.h &: \
+  $(SOURCES)/helppages.txt $(BUILD)/last-commit tools/paginate_help.py 
+	$(PY) tools/paginate_help.py -DCOMMIT="$$(cat $(BUILD)/last-commit)" $< -o $(basename $@).s -oh $(basename $@).h
+
+# Linker rules ######################################################
+
+$(ROM) $(ELF) &: $(OFILES)
+	@echo "OFILES is $(OFILES)"
+	@echo "Attempting link"
+	$(ROMLINK) -o $(ROM) --output-elf $(ELF) $(ROMLINKFLAGS) -- $(OFILES) $(LDFLAGS)
+
+# Packaging rules ###################################################
+
+$(MKDIR_SENTINEL):
+	mkdir -p $(dir $@)
+	echo "Build temporaries" > $@
+
+$(BUILD)/last-commit-now: $(MKDIR_SENTINEL)
+	git describe --tags | tr -d '\r\n' > $@
+$(BUILD)/last-commit: $(BUILD)/last-commit-now
+	if test -f $@; then true; else touch $@; fi
+	cmp $< $@ || cp $< $@
